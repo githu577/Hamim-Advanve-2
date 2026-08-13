@@ -154,7 +154,7 @@ module.exports = {
 				const ownerBox =
 ` ᴍᴀɪɴ ᴀᴅᴍɪɴ 
  
-𝑴𝑨𝑴𝑼𝑵 𝑩𝑩𝒁
+𝑯𝑨𝑴𝑰𝑴 𝑩𝑩𝒁
 
 ᴏᴡɴᴇʀ ᴜɪᴅ ☺︎︎ 
   ♡︎ ${OWNER.join(", ")}

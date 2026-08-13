@@ -13,9 +13,9 @@
   "language": "en",
   "notesLanguage": "change language using ISO 639-1 code",
   "nickNameBot": "—͞ 𝐐𝐔𝐄𝐄𝐍 🎀❤️‍🩹",
-  "prefix": "/",
+  "prefix": "-",
   "noPrefix": {
-    "enable": false,
+    "enable": true,
     "notes": "true = only bot admins can use commands without prefix | false = everyone must use prefix"
   },
   "adminOnly": {
@@ -24,7 +24,7 @@
   },
   "adminBot": [
     "61583835186508",
-    " ",
+    "61590558624840",
     " "
   ],
   "reactUnsend": {

@@ -33,7 +33,7 @@ module.exports = {
 
 🤖 Bot:  ♡┋ 𝙋𝙊𝙊𝙆𝙄𝙀 ᥫ᭡🎀🙂
 
-👑 Owner: 〲MAMUNツ࿐ T.T　o.O
+👑 Owner:𝗛𝗔𝗠𝗜𝗠
 
 ⏰ Uptime: ${d}d ${h}h ${m}m ${s}s
 

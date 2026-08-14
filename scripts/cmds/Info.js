@@ -18,7 +18,7 @@ module.exports = {
   onStart: async function ({ message }) {
 
     // OWNER INFO
-    const authorName = "×᷼×ＭＡ☂Ｍ☂ＵＮ☆";
+    const authorName = "×᷼×𝐇𝐀☂𝐌𝐢☂𝐌☆";
     const ownAge = "19+";
     const messenger = "https://m.me/61590558624840";
     const authorFB = "—͞Hꫝᴍɪᴍ⎯♡︎💋🌷";

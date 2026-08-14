@@ -20,9 +20,9 @@ module.exports = {
     // OWNER INFO
     const authorName = "×᷼×ＭＡ☂Ｍ☂ＵＮ☆";
     const ownAge = "19+";
-    const messenger = "https://m.me/mamun.8192";
-    const authorFB = "MA M UN Bb'z";
-    const authorNumber = "+8801830981279";
+    const messenger = "https://m.me/61590558624840";
+    const authorFB = "—͞Hꫝᴍɪᴍ⎯♡︎💋🌷";
+    const authorNumber = "miri khaw";
     const Status = "Single";
 
     // SAFE CATBOX VIDEO LINK

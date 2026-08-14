@@ -1,3 +1,4 @@
+const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
@@ -17,13 +18,21 @@ function loadUserPrefix() {
 }
 
 const TRIGGER_WORDS = ["prefix", "prefix bot là gì", "quên prefix r", "dùng sao"];
-const GIFS = ["mari1.gif"];
+
+// 📌 আপনার পছন্দের ৩টি GIF/Image Direct Link এখানে দিন:
+const GIF_LINKS = [
+  "https://i.imgur.com/lVpciqC.gif",
+  "https://i.imgur.com/lVpciqC.gif",
+  "https://i.imgur.com/lVpciqC.gif"
+];
 
 async function showPrefixStatus({ event, message, threadsData }) {
   const { threadID, senderID } = event;
   let statusText = "";
+  const cachePath = path.join(__dirname, "cache", `prefix_${Date.now()}.gif`);
+
   try {
-    // System + group prefix (GoatBot's own thread-data store, E2EE-safe)
+    // System + group prefix
     const systemPrefix = global.GoatBot.config.prefix;
     let groupPrefix = systemPrefix;
     try {
@@ -32,7 +41,7 @@ async function showPrefixStatus({ event, message, threadsData }) {
       console.error("[prefix.js - get thread prefix]", err);
     }
 
-    // Own (personal) prefix, if this user has one set
+    // Personal prefix
     const userPrefixData = loadUserPrefix();
     const ownPrefix = userPrefixData[String(senderID)];
 
@@ -45,22 +54,35 @@ async function showPrefixStatus({ event, message, threadsData }) {
     }
 
     statusText += `
-├‣ ғʙ : ʀxαвᴅυℓℓαн007
+├‣ ғʙ : —͞Hꫝᴍɪᴍ⎯♡︎💋🌷
 ╰────────────◊`;
 
-    const randomGif = GIFS[Math.floor(Math.random() * GIFS.length)];
-    const gifPath = path.join(__dirname, "noprefix", randomGif);
+    // র্যান্ডম GIF লিংক সিলেক্ট করা
+    const randomLink = GIF_LINKS[Math.floor(Math.random() * GIF_LINKS.length)];
 
-    if (fs.existsSync(gifPath)) {
-      return message.reply({
-        body: statusText,
-        attachment: fs.createReadStream(gifPath)
-      });
-    } else {
-      return message.reply(statusText);
+    // ক্যানসেল ফিল্ড তৈরি থাকলে cache ফোল্ডার চেক
+    const cacheDir = path.dirname(cachePath);
+    if (!fs.existsSync(cacheDir)) {
+      fs.mkdirSync(cacheDir, { recursive: true });
+    }
+
+    // GIF ডাউনলোড করা
+    const response = await axios.get(randomLink, { responseType: "arraybuffer" });
+    fs.writeFileSync(cachePath, Buffer.from(response.data, "binary"));
+
+    // মেসেজ রিপ্লাই দেওয়া
+    await message.reply({
+      body: statusText,
+      attachment: fs.createReadStream(cachePath)
+    });
+
+    // সাময়িক ডাউনলোড করা ফাইলটি ডিলেট করে ক্লিন রাখা
+    if (fs.existsSync(cachePath)) {
+      fs.unlinkSync(cachePath);
     }
   } catch (err) {
     console.error("[prefix.js]", err);
+    if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);
     return message.reply(statusText || "❌ Error showing prefix status.");
   }
 }
@@ -68,25 +90,21 @@ async function showPrefixStatus({ event, message, threadsData }) {
 module.exports = {
   config: {
     name: "prefix",
-    version: "3.0.0",
-    author: "rX",
+    version: "3.1.0",
+    author: "MJ Hamim",
     countDown: 5,
     role: 0,
-    description: "Show bot prefix with random gif",
+    description: "Show bot prefix with random GIF link",
     category: "system",
     guide: {
       en: "   {p}prefix: show system/group/your own prefix"
     }
   },
 
-  // Invoked via "{p}prefix" — already gated by GoatBot's command dispatch,
-  // no need to re-check trigger words here.
   onStart: async function (ctx) {
     return showPrefixStatus(ctx);
   },
 
-  // Invoked on bare trigger words typed without the command prefix
-  // (e.g. just "prefix", or the Vietnamese casual phrases below).
   onChat: async function (ctx) {
     const { event } = ctx;
     if (!event.body) return;

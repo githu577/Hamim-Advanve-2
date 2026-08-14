@@ -19,12 +19,8 @@ function loadUserPrefix() {
 
 const TRIGGER_WORDS = ["prefix", "prefix bot là gì", "quên prefix r", "dùng sao"];
 
-// 📌 আপনার পছন্দের ৩টি GIF/Image Direct Link এখানে দিন:
-const GIF_LINKS = [
-  "https://i.imgur.com/lVpciqC.gif",
-  "https://i.imgur.com/lVpciqC.gif",
-  "https://i.imgur.com/lVpciqC.gif"
-];
+// 📌 এখানে একটি সরাসরি Working GIF / Image URL রাখা হয়েছে:
+const DIRECT_GIF = "https://i.imgur.com/7Ce2tly.gif"; 
 
 async function showPrefixStatus({ event, message, threadsData }) {
   const { threadID, senderID } = event;
@@ -54,32 +50,36 @@ async function showPrefixStatus({ event, message, threadsData }) {
     }
 
     statusText += `
-├‣ ғʙ : —͞Hꫝᴍɪᴍ⎯♡︎💋🌷
+├‣ ғв : —͞Hꫝᴍɪᴍ⎯♡︎💋🌷
 ╰────────────◊`;
 
-    // র্যান্ডম GIF লিংক সিলেক্ট করা
-    const randomLink = GIF_LINKS[Math.floor(Math.random() * GIF_LINKS.length)];
-
-    // ক্যানসেল ফিল্ড তৈরি থাকলে cache ফোল্ডার চেক
     const cacheDir = path.dirname(cachePath);
     if (!fs.existsSync(cacheDir)) {
       fs.mkdirSync(cacheDir, { recursive: true });
     }
 
-    // GIF ডাউনলোড করা
-    const response = await axios.get(randomLink, { responseType: "arraybuffer" });
-    fs.writeFileSync(cachePath, Buffer.from(response.data, "binary"));
+    // single GIF Download
+    const response = await axios.get(DIRECT_GIF, { responseType: "stream" });
+    const writer = fs.createWriteStream(cachePath);
+    response.data.pipe(writer);
 
-    // মেসেজ রিপ্লাই দেওয়া
-    await message.reply({
-      body: statusText,
-      attachment: fs.createReadStream(cachePath)
+    writer.on("finish", () => {
+      message.reply(
+        {
+          body: statusText,
+          attachment: fs.createReadStream(cachePath)
+        },
+        () => {
+          if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);
+        }
+      );
     });
 
-    // সাময়িক ডাউনলোড করা ফাইলটি ডিলেট করে ক্লিন রাখা
-    if (fs.existsSync(cachePath)) {
-      fs.unlinkSync(cachePath);
-    }
+    writer.on("error", (err) => {
+      console.error("Stream write error:", err);
+      message.reply(statusText);
+    });
+
   } catch (err) {
     console.error("[prefix.js]", err);
     if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);
@@ -90,11 +90,11 @@ async function showPrefixStatus({ event, message, threadsData }) {
 module.exports = {
   config: {
     name: "prefix",
-    version: "3.1.0",
+    version: "3.3.0",
     author: "MJ Hamim",
     countDown: 5,
     role: 0,
-    description: "Show bot prefix with random GIF link",
+    description: "Show bot prefix with a single GIF",
     category: "system",
     guide: {
       en: "   {p}prefix: show system/group/your own prefix"
@@ -108,6 +108,10 @@ module.exports = {
   onChat: async function (ctx) {
     const { event } = ctx;
     if (!event.body) return;
+
+    // প্রিফিক্স সহ দিলে ২ বার আসা আটকাবে
+    const systemPrefix = global.GoatBot.config.prefix;
+    if (event.body.startsWith(systemPrefix)) return;
 
     const lowerBody = event.body.trim().toLowerCase();
     if (!TRIGGER_WORDS.includes(lowerBody)) return;

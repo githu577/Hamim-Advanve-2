@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const axios = require("axios");
 
 const API_BASE = "https://mirai-store.vercel.app";
 const PASTE_API_BASE = "https://pastebin-raw.vercel.app";
@@ -8,28 +9,6 @@ const AUTOSYNC_CACHE_PATH = path.join(process.cwd(), "goatstore_sync_cache.json"
 
 let _updateCheckCache = null;
 const UPDATE_CHECK_INTERVAL = 1000 * 60 * 30;
-
-// Simple fetch helpers (no axios needed)
-async function httpGet(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-
-async function httpPost(url, body) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data?.error || `HTTP ${res.status}`);
-    err.response = { data };
-    throw err;
-  }
-  return data;
-}
 
 function loadSyncCache() {
   try { return JSON.parse(fs.readFileSync(AUTOSYNC_CACHE_PATH, "utf8")); }
@@ -48,12 +27,15 @@ function hashContent(content) {
 }
 
 function detectFramework(code) {
+  // Primary check: GoatBot config e author + role dutai thake,
+  // Mirai config e credits + hasPermission (function) dutai thake.
   const hasAuthorRole = /\bauthor\s*:/.test(code) && /\brole\s*:/.test(code);
   const hasCreditsPermission = /\bcredits\s*:/.test(code) && /\bhasPermission\s*[:(]/.test(code);
 
   if (hasAuthorRole && !hasCreditsPermission) return "goat";
   if (hasCreditsPermission && !hasAuthorRole) return "mirai";
 
+  // Ambiguous hole (dutai match korle ba kono ta match na korle) structural check e fallback
   const isGoatStructure =
     /module\.exports\s*=\s*\{/.test(code) &&
     /onStart\s*[:(]|onChat\s*[:(]|onLoad\s*[:(]/.test(code);
@@ -64,14 +46,24 @@ function detectFramework(code) {
   return (isGoatStructure && !isMiraiStructure) ? "goat" : "mirai";
 }
 
+/**
+ * Uploads code to the pastebin service and returns a guaranteed non-empty
+ * rawUrl string, or throws. The MiraiStore /miraistore/upload endpoint now
+ * hard-requires rawUrl on every call (returns { error: "rawUrl required" }
+ * if it's missing), so this must always run BEFORE building the upload
+ * payload — every caller below does that, and aborts (never calls
+ * /miraistore/upload) if this throws.
+ */
 async function pasteCode(content) {
-  const data = await httpPost(`${PASTE_API_BASE}/api/paste`, { code: content });
-  if (!data?.id) throw new Error("Paste API theke id pawa jayni.");
-  const rawUrl = data.url || `\( {PASTE_API_BASE}/raw/ \){data.id}`;
+  const res = await axios.post(`${PASTE_API_BASE}/api/paste`, { code: content });
+  if (!res.data?.id) throw new Error("Paste API theke id pawa jayni.");
+  const rawUrl = res.data.url || `${PASTE_API_BASE}/raw/${res.data.id}`;
   if (!rawUrl || typeof rawUrl !== "string" || !rawUrl.trim()) {
+    // Defensive: guarantee callers never receive an empty/falsy rawUrl,
+    // since the server now rejects the upload outright without one.
     throw new Error("Paste API theke valid rawUrl toiri kora gelo na.");
   }
-  return { id: data.id, rawUrl };
+  return { id: res.data.id, rawUrl };
 }
 
 async function checkSelfUpdate() {
@@ -79,8 +71,8 @@ async function checkSelfUpdate() {
   if (_updateCheckCache && (now - _updateCheckCache.checkedAt) < UPDATE_CHECK_INTERVAL)
     return _updateCheckCache.result;
   try {
-    const data = await httpGet(`${API_BASE}/miraistore/search?q=goatstore&limit=10&type=goat-command`);
-    const cmds = Array.isArray(data?.commands) ? data.commands : [];
+    const res = await axios.get(`${API_BASE}/miraistore/search?q=goatstore&limit=10&type=goat-command`);
+    const cmds = Array.isArray(res.data?.commands) ? res.data.commands : [];
     const match =
       cmds.find(c => c.name?.toLowerCase() === "goatstore" && c.author === module.exports.config.author) ||
       cmds.find(c => c.name?.toLowerCase() === "goatstore");
@@ -105,11 +97,11 @@ async function checkSelfUpdate() {
 async function getTodayUpdates() {
   try {
     const [c, e] = await Promise.all([
-      httpGet(`${API_BASE}/miraistore/list?limit=50&type=goat-command`),
-      httpGet(`${API_BASE}/miraistore/list?limit=50&type=goat-event`)
+      axios.get(`${API_BASE}/miraistore/list?limit=50&type=goat-command`),
+      axios.get(`${API_BASE}/miraistore/list?limit=50&type=goat-event`)
     ]);
     const today = new Date().toDateString();
-    return [...(c.commands || []), ...(e.commands || [])]
+    return [...(c.data.commands || []), ...(e.data.commands || [])]
       .filter(cmd => new Date(cmd.uploadDate).toDateString() === today);
   } catch (_) { return []; }
 }
@@ -129,7 +121,7 @@ async function runAutoSync() {
     const files = fs.readdirSync(dir).filter(f => f.endsWith(".js"));
     for (const file of files) {
       const fullPath = path.join(dir, file);
-      const cacheKey = `\( {kind}: \){file}`;
+      const cacheKey = `${kind}:${file}`;
       let content;
       try { content = fs.readFileSync(fullPath, "utf8"); } catch (_) { continue; }
 
@@ -139,12 +131,17 @@ async function runAutoSync() {
       try { new Function(content); } catch (_) { continue; }
       if (detectFramework(content) !== "goat") continue;
 
+      // rawUrl MUST be generated first — the server now rejects the upload
+      // entirely (error: "rawUrl required") if it's missing. pasteCode()
+      // throws if it can't produce a valid non-empty URL, so on failure we
+      // skip this file for this sync pass (it'll be retried next sync,
+      // since the cache is only updated on a successful upload response).
       let rawUrl;
       try {
         const result = await pasteCode(content);
         rawUrl = result.rawUrl;
       } catch (err) {
-        console.error(`[goatstore-sync] Paste failed for ${file}:`, err.message);
+        console.error(`[goatstore-sync] Paste failed for ${file}:`, err.response?.data?.error || err.message);
         await new Promise(r => setTimeout(r, 500));
         continue;
       }
@@ -154,21 +151,24 @@ async function runAutoSync() {
                     || content.match(/credits\s*:\s*["'`](.*?)["'`]/)?.[1]
                     || "Unknown";
         const category = content.match(/category\s*:\s*["'`](.*?)["'`]/)?.[1] || "Uncategorized";
-        const res = await httpPost(`${API_BASE}/miraistore/upload`, { rawUrl, rawCode: content, framework: "goat", kind, author, category });
-        if (res?.error) {
-          console.error(`[goatstore-sync] Paste hoyeche (${rawUrl}) kintu store API error for ${file}:`, res.error);
-        } else if (res?.olderVersion) {
-          console.log(`[goatstore-sync] ${file}: older version — stored as separate new entry (ID: ${res.id}).`);
+        const res = await axios.post(`${API_BASE}/miraistore/upload`, { rawUrl, rawCode: content, framework: "goat", kind, author, category });
+        if (res.data?.error) {
+          // Includes the server's "rawUrl required" case if it were ever hit
+          // (shouldn't happen given the guard above, but surfaced clearly
+          // either way instead of a silent/generic failure).
+          console.error(`[goatstore-sync] Paste hoyeche (${rawUrl}) kintu store API error for ${file}:`, res.data.error);
+        } else if (res.data?.olderVersion) {
+          console.log(`[goatstore-sync] ${file}: older version — stored as separate new entry (ID: ${res.data.id}).`);
           cache[cacheKey] = hash;
-        } else if (res?.updated) {
-          console.log(`[goatstore-sync] ${file}: updated existing entry (ID: \( {res.id}) to v \){res.version}.`);
+        } else if (res.data?.updated) {
+          console.log(`[goatstore-sync] ${file}: updated existing entry (ID: ${res.data.id}) to v${res.data.version}.`);
           cache[cacheKey] = hash;
         } else {
-          console.log(`[goatstore-sync] ${file}: uploaded as new entry (ID: ${res.id}).`);
+          console.log(`[goatstore-sync] ${file}: uploaded as new entry (ID: ${res.data.id}).`);
           cache[cacheKey] = hash;
         }
       } catch (err) {
-        console.error(`[goatstore-sync] Paste hoyeche (${rawUrl}) kintu store API call fail for ${file}:`, err.message);
+        console.error(`[goatstore-sync] Paste hoyeche (${rawUrl}) kintu store API call fail for ${file}:`, err.response?.data?.error || err.message);
       }
 
       await new Promise(r => setTimeout(r, 500));
@@ -191,7 +191,7 @@ async function animateInstall(api, threadID, name) {
   const info = await api.sendMessage(`📦 Installing ${name}...\n\n◖ Fetching package info...\n[░░░░░░░░░░] 0%`, threadID);
   for (let i = 0; i < steps.length; i++) {
     await new Promise(r => setTimeout(r, steps[i].delay));
-    await api.editMessage(`📦 Installing \( {name}...\n\n \){frames[i]} \( {steps[i].label}...\n[ \){buildBar(steps[i].pct)}] ${steps[i].pct}%`, info.messageID);
+    await api.editMessage(`📦 Installing ${name}...\n\n${frames[i]} ${steps[i].label}...\n[${buildBar(steps[i].pct)}] ${steps[i].pct}%`, info.messageID);
   }
   return info.messageID;
 }
@@ -206,7 +206,7 @@ async function animateUpload(api, threadID, name) {
   const info = await api.sendMessage(`📤 Uploading ${name}...\n\n◖ Preparing upload...\n[░░░░░░░░░░] 0%`, threadID);
   for (let i = 0; i < steps.length; i++) {
     await new Promise(r => setTimeout(r, steps[i].delay));
-    await api.editMessage(`📤 Uploading \( {name}...\n\n \){frames[i]} \( {steps[i].label}...\n[ \){buildBar(steps[i].pct)}] ${steps[i].pct}%`, info.messageID);
+    await api.editMessage(`📤 Uploading ${name}...\n\n${frames[i]} ${steps[i].label}...\n[${buildBar(steps[i].pct)}] ${steps[i].pct}%`, info.messageID);
   }
   return info.messageID;
 }
@@ -232,7 +232,8 @@ function autoloadCommand(filePath) {
 async function doInstall(api, threadID, id, forceKind = null) {
   let cmdData = null;
   try {
-    const data = await httpGet(`\( {API_BASE}/miraistore/search?q= \){encodeURIComponent(id)}`);
+    const res = await axios.get(`${API_BASE}/miraistore/search?q=${encodeURIComponent(id)}`);
+    const data = res.data;
     if (!isNaN(id) && data?.rawCode && !Array.isArray(data)) cmdData = data;
     else if (Array.isArray(data?.commands)) cmdData = data.commands.find(c => String(c.id) === String(id));
     if (!cmdData?.rawCode) return api.sendMessage("❌ Command not found or rawCode missing.", threadID);
@@ -260,7 +261,7 @@ async function doInstall(api, threadID, id, forceKind = null) {
   const baseDir = process.cwd();
   const installDir = isEvent ? path.join(baseDir, "scripts", "events") : path.join(baseDir, "scripts", "cmds");
   const filePath = path.join(installDir, fileName);
-  const locLabel = isEvent ? `scripts/events/\( {fileName}` : `scripts/cmds/ \){fileName}`;
+  const locLabel = isEvent ? `scripts/events/${fileName}` : `scripts/cmds/${fileName}`;
 
   try {
     if (!fs.existsSync(installDir)) fs.mkdirSync(installDir, { recursive: true });
@@ -270,7 +271,7 @@ async function doInstall(api, threadID, id, forceKind = null) {
     return api.sendMessage(`❌ Failed to write file:\n${err.message}`, threadID);
   }
 
-  try { await httpPost(`\( {API_BASE}/miraistore/install/ \){cmdData.id}`, {}); } catch (_) {}
+  try { await axios.post(`${API_BASE}/miraistore/install/${cmdData.id}`); } catch (_) {}
 
   const load = isEvent ? { success: false } : autoloadCommand(filePath);
 
@@ -297,13 +298,14 @@ async function doInstall(api, threadID, id, forceKind = null) {
 async function sendListPage(api, threadID, senderID, type, page, limit = 10) {
   const offset = (page - 1) * limit;
   try {
-    const data = await httpGet(`\( {API_BASE}/miraistore/list?limit= \){limit}&offset=\( {offset}&type= \){type}`);
+    const res = await axios.get(`${API_BASE}/miraistore/list?limit=${limit}&offset=${offset}&type=${type}`);
+    const data = res.data;
     if (!Array.isArray(data.commands) || !data.commands.length)
       return api.sendMessage("❌ No results found for this page.", threadID);
 
     const totalPages = Math.ceil(data.total / limit);
     const label = type === "goat-event" ? "GoatBot Events" : "GoatBot Commands";
-    let msg = `📂 ${label} — Page \( {page}/ \){totalPages} (${data.total} total)\n\n`;
+    let msg = `📂 ${label} — Page ${page}/${totalPages} (${data.total} total)\n\n`;
     data.commands.forEach(cmd => {
       msg += `╭─‣ ${cmd.name} 〄\n`;
       msg += `├‣ ID : ${cmd.id}\n`;
@@ -327,15 +329,15 @@ async function sendSearchPage(api, threadID, senderID, query, page, limit = 5) {
   const offset = (page - 1) * limit;
   try {
     const [cr, er] = await Promise.all([
-      httpGet(`\( {API_BASE}/miraistore/search?q= \){encodeURIComponent(query)}&limit=\( {limit}&offset= \){offset}&type=goat-command`),
-      httpGet(`\( {API_BASE}/miraistore/search?q= \){encodeURIComponent(query)}&limit=\( {limit}&offset= \){offset}&type=goat-event`)
+      axios.get(`${API_BASE}/miraistore/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}&type=goat-command`),
+      axios.get(`${API_BASE}/miraistore/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}&type=goat-event`)
     ]);
-    const all = [...(cr.commands || []), ...(er.commands || [])];
-    const total = (cr.total || 0) + (er.total || 0);
+    const all = [...(cr.data.commands || []), ...(er.data.commands || [])];
+    const total = (cr.data.total || 0) + (er.data.total || 0);
     if (!all.length) return api.sendMessage(`❌ No GoatBot results found for "${query}".`, threadID);
 
     const totalPages = Math.max(1, Math.ceil(total / (limit * 2)));
-    let msg = `🔍 Search: "\( {query}" ( \){total} found)\n\n`;
+    let msg = `🔍 Search: "${query}" (${total} found)\n\n`;
     all.forEach(cmd => {
       msg += `╭─‣ ${cmd.name} 〄\n`;
       msg += `├‣ ID : ${cmd.id}\n`;
@@ -345,7 +347,7 @@ async function sendSearchPage(api, threadID, senderID, query, page, limit = 5) {
       msg += `╰────────────◊\n`;
       msg += ` ✰ Upload : ${new Date(cmd.uploadDate || Date.now()).toDateString()}\n\n`;
     });
-    if (totalPages > 1) msg += `Page \( {page}/ \){totalPages}\nReact to go next page.`;
+    if (totalPages > 1) msg += `Page ${page}/${totalPages}\nReact to go next page.`;
 
     const sent = await api.sendMessage(msg.trim(), threadID);
     if (totalPages > 1) {
@@ -371,6 +373,11 @@ async function uploadFile(api, threadID, filePath, kind) {
   let pid;
   try { pid = await animateUpload(api, threadID, displayName); } catch (_) {}
 
+  // rawUrl MUST be generated and confirmed valid BEFORE calling
+  // /miraistore/upload — the server now hard-requires it and returns
+  // { error: "rawUrl required" } otherwise. pasteCode() throws on any
+  // failure (paste API error OR empty/invalid URL), so this whole block
+  // aborts cleanly (with a clear message) before ever reaching the store call.
   let rawUrl;
   try {
     const result = await pasteCode(data);
@@ -380,7 +387,7 @@ async function uploadFile(api, threadID, filePath, kind) {
     return api.sendMessage(
       `❌ Paste Upload Failed!\n` +
       `╭─‣ Step : Code -> Pastebin\n` +
-      `├‣ Error : ${err.message}\n` +
+      `├‣ Error : ${err.response?.data?.error || err.message}\n` +
       `╰────────────◊\n` +
       `💡 Eta bot side er problem — pastebin e code ta e upload hoyni, tai rawUrl toiri hoyni.`,
       threadID
@@ -388,21 +395,28 @@ async function uploadFile(api, threadID, filePath, kind) {
   }
 
   try {
-    const res = await httpPost(`${API_BASE}/miraistore/upload`, { rawUrl, rawCode: data, framework: "goat", kind });
+    const res = await axios.post(`${API_BASE}/miraistore/upload`, { rawUrl, rawCode: data, framework: "goat", kind });
 
-    if (res?.error === "Already exists" || res?.error === "Not allowed") {
+    // "Already exists" (same name+author+type+version) and protected-name
+    // blocks come back as res.data.error — but they aren't really paste/API
+    // failures, so give them their own clear message instead of the generic
+    // "Store API Error" wording below.
+    if (res.data?.error === "Already exists" || res.data?.error === "Not allowed") {
       if (pid) api.unsendMessage(pid);
       return api.sendMessage(
-        `⚠️ ${res.error === "Not allowed" ? "Upload Blocked!" : "Already Exists in Store!"}\n` +
+        `⚠️ ${res.data.error === "Not allowed" ? "Upload Blocked!" : "Already Exists in Store!"}\n` +
         `╭─‣ Name : ${displayName}\n` +
-        (res.id ? `├‣ ID : ${res.id}\n` : "") +
+        (res.data.id ? `├‣ ID : ${res.data.id}\n` : "") +
         `╰────────────◊\n` +
-        `💡 ${res.message}`,
+        `💡 ${res.data.message}`,
         threadID
       );
     }
 
-    if (res?.error === "rawUrl required") {
+    // Server hard-requires rawUrl now — give this its own clear message too
+    // instead of falling through to the generic "Store API Error" wording,
+    // since this specific case means the payload itself was incomplete.
+    if (res.data?.error === "rawUrl required") {
       if (pid) api.unsendMessage(pid);
       return api.sendMessage(
         `⚠️ rawUrl Missing!\n` +
@@ -413,12 +427,12 @@ async function uploadFile(api, threadID, filePath, kind) {
       );
     }
 
-    if (res?.error) {
+    if (res.data?.error) {
       if (pid) api.unsendMessage(pid);
       return api.sendMessage(
         `⚠️ Paste Hoyeche, Kintu Store API Error!\n` +
         `╭─‣ Paste Link : ${rawUrl}\n` +
-        `├‣ Error : ${res.error}\n` +
+        `├‣ Error : ${res.data.error}\n` +
         `╰────────────◊\n` +
         `💡 Code ta pastebin e successfully upload hoyeche (link kaj korbe), kintu MiraiStore backend register korte parenai. Backend/API side check koro.`,
         threadID
@@ -431,24 +445,27 @@ async function uploadFile(api, threadID, filePath, kind) {
     const version = data.match(/version\s*:\s*["'`](.*?)["'`]/)?.[1] || "N/A";
     const category = data.match(/category\s*:\s*["'`](.*?)["'`]/)?.[1] || "Uncategorized";
 
+    // Distinguish: brand new entry vs overwritten (newer version) entry vs
+    // stored-separately (older version) entry — each gets its own header
+    // and surfaces the server's message so the user knows exactly what happened.
     let header = "✅ Upload Successful!";
     let note = "";
-    if (res.olderVersion) {
+    if (res.data.olderVersion) {
       header = "⚠️ Older Version — Stored As New Entry!";
-      note = `💡 ${res.message}\n`;
-    } else if (res.updated) {
+      note = `💡 ${res.data.message}\n`;
+    } else if (res.data.updated) {
       header = "🔄 Updated Existing Entry (Overwritten)!";
-      note = `💡 ${res.message}\n`;
+      note = `💡 ${res.data.message}\n`;
     }
 
     const msg =
       `${header}\n` +
       `╭─‣ Name : ${displayName}\n` +
-      `├‣ Type : \( {res.type || `goat- \){kind}`}\n` +
+      `├‣ Type : ${res.data.type || `goat-${kind}`}\n` +
       `├‣ Version : ${version}\n` +
       `├‣ Author : ${author}\n` +
       `├‣ Category : ${category}\n` +
-      `├‣ ID : ${res.id}\n` +
+      `├‣ ID : ${res.data.id}\n` +
       `╰────────────◊\n` +
       note +
       `⭔ Upload : ${new Date().toDateString()}`;
@@ -459,7 +476,7 @@ async function uploadFile(api, threadID, filePath, kind) {
     api.sendMessage(
       `⚠️ Paste Hoyeche, Kintu Store API Call Fail Korlo!\n` +
       `╭─‣ Paste Link : ${rawUrl}\n` +
-      `├‣ Error : ${err.message}\n` +
+      `├‣ Error : ${err.response?.data?.error || err.message}\n` +
       `╰────────────◊\n` +
       `💡 Code ta pastebin e ache (link kaj korbe), kintu MiraiStore backend e request e i pouchayni thik moto. Backend/network check koro.`,
       threadID
@@ -471,7 +488,7 @@ module.exports = {
   config: {
     name: "goatstore",
     aliases: ["gs", "cmdstore", "commandstore"],
-    version: "7.2.1",
+    version: "7.2.0",
     author: "rX & EryXenX",
     countDown: 3,
     role: 2,
@@ -539,8 +556,8 @@ module.exports = {
     if (!sub) {
       const [updates, selfUpdate] = await Promise.all([getTodayUpdates(), checkSelfUpdate()]);
 
-      if (selfUpdate?.hasUpdate && !userSeenNoti.get(`upd_\( {selfUpdate.latestVersion}_ \){senderID}`)) {
-        userSeenNoti.set(`upd_\( {selfUpdate.latestVersion}_ \){senderID}`, true);
+      if (selfUpdate?.hasUpdate && !userSeenNoti.get(`upd_${selfUpdate.latestVersion}_${senderID}`)) {
+        userSeenNoti.set(`upd_${selfUpdate.latestVersion}_${senderID}`, true);
         return api.sendMessage(
           `🆙 [ GOATSTORE UPDATE AVAILABLE ]\n` +
           `━━━━━━━━━━━━━━━━━━\n` +
@@ -631,10 +648,10 @@ module.exports = {
 
       if (!action) {
         try {
-          const data = await httpGet(`${API_BASE}/miraistore/list?limit=20&type=goat-event`);
-          const events = data.commands || [];
+          const res = await axios.get(`${API_BASE}/miraistore/list?limit=20&type=goat-event`);
+          const events = res.data.commands || [];
           if (!events.length) return api.sendMessage("❌ No GoatBot events found in store.", threadID);
-          let msg = `📂 GoatBot Store Events (${data.total})\n\n`;
+          let msg = `📂 GoatBot Store Events (${res.data.total})\n\n`;
           events.forEach(cmd => {
             msg += `╭─‣ ${cmd.name}\n├‣ ID : ${cmd.id}\n├‣ Author : ${cmd.author}\n╰────────────◊\n\n`;
           });
@@ -644,8 +661,8 @@ module.exports = {
       }
 
       try {
-        const data = await httpGet(`\( {API_BASE}/miraistore/search?q= \){encodeURIComponent(action)}&limit=5&type=goat-event`);
-        const events = data.commands || [];
+        const res = await axios.get(`${API_BASE}/miraistore/search?q=${encodeURIComponent(action)}&limit=5&type=goat-event`);
+        const events = res.data.commands || [];
         if (!events.length) return api.sendMessage(`❌ No GoatBot event found: "${action}"`, threadID);
         let msg = `📂 GoatBot Events matching "${action}"\n\n`;
         events.forEach(cmd => {
@@ -666,20 +683,21 @@ module.exports = {
       const id = args[1];
       if (!id) return api.sendMessage("❌ Usage: !gs like <id>", threadID);
       try {
-        const res = await httpPost(`\( {API_BASE}/miraistore/like/ \){id}`, { userID: senderID });
-        if (res?.message) return api.sendMessage("⚠️ Already liked.", threadID);
-        return api.sendMessage(`❤️ Liked! Total Likes: ${res.likes}`, threadID);
+        const res = await axios.post(`${API_BASE}/miraistore/like/${id}`, { userID: senderID });
+        if (res.data?.message) return api.sendMessage("⚠️ Already liked.", threadID);
+        return api.sendMessage(`❤️ Liked! Total Likes: ${res.data.likes}`, threadID);
       } catch (_) { return api.sendMessage("❌ Like API error.", threadID); }
     }
 
     if (sub === "trend" || sub === "trending") {
       try {
-        const list = (await httpGet(`${API_BASE}/miraistore/trending?limit=5`) || []).filter(c => ["goat-command", "goat-event"].includes(c.type));
+        const res = await axios.get(`${API_BASE}/miraistore/trending?limit=5`);
+        const list = (res.data || []).filter(c => ["goat-command", "goat-event"].includes(c.type));
         if (!list.length) return api.sendMessage("❌ No GoatBot trending files.", threadID);
         let msg = `🔥 Top GoatBot Trending 🔥\n\n`;
         list.forEach((cmd, i) => {
           msg +=
-            `╭─‣ \( {cmd.name} \){i === 0 ? " 🏆" : ""}\n` +
+            `╭─‣ ${cmd.name}${i === 0 ? " 🏆" : ""}\n` +
             `├‣ Type : ${cmd.type === "goat-event" ? "🎯 Event" : "⚡ Command"}\n` +
             `├‣ Likes : ❤️ ${cmd.likes}\n` +
             `├‣ Views : 👁️ ${cmd.views}\n` +
@@ -713,15 +731,16 @@ module.exports = {
       const id = args[1], secret = args[2];
       if (!id || !secret) return api.sendMessage("❌ Usage: !gs delete <id> <secret>", threadID);
       try {
-        const res = await httpPost(`\( {API_BASE}/miraistore/delete/ \){id}`, { secret });
-        if (res?.error) return api.sendMessage(`❌ ${res.error}`, threadID);
+        const res = await axios.post(`${API_BASE}/miraistore/delete/${id}`, { secret });
+        if (res.data?.error) return api.sendMessage(`❌ ${res.data.error}`, threadID);
         return api.sendMessage(`🗑️ Deleted! ID: ${id}`, threadID);
       } catch (_) { return api.sendMessage("❌ Delete API error.", threadID); }
     }
 
     const query = args.join(" ");
     try {
-      const data = await httpGet(`\( {API_BASE}/miraistore/search?q= \){encodeURIComponent(query)}`);
+      const res = await axios.get(`${API_BASE}/miraistore/search?q=${encodeURIComponent(query)}`);
+      const data = res.data;
       if (!data || data.message) return api.sendMessage("❌ Not found.", threadID);
 
       if (!isNaN(query) && !Array.isArray(data) && !data.commands) {
